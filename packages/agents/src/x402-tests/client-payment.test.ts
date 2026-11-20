@@ -196,3 +196,50 @@ describe("x402 selected-payment cap", () => {
     }
   );
 });
+
+describe("x402 client payment encoding and caps", () => {
+  it("pays above $1 when maxPaymentValue allows it", async () => {
+    const { client, signTypedData } = setup(
+      [{ ...requirement, amount: "5000000" }],
+      undefined,
+      10_000_000n
+    );
+    expect(
+      (await client.callTool(null, { name: "test" })).isError
+    ).toBeUndefined();
+    expect(signTypedData).toHaveBeenCalledOnce();
+  });
+
+  it("encodes a resource description outside Latin-1", async () => {
+    const client = new Client({ name: "payment-test", version: "1.0.0" });
+    const description = "Weather — in °C ☀";
+    const callTool = vi
+      .spyOn(client, "callTool")
+      .mockResolvedValueOnce({
+        isError: true,
+        content: [],
+        _meta: {
+          "x402/error": {
+            x402Version: 2,
+            resource: { url: "x402://test", description },
+            accepts: [requirement]
+          }
+        }
+      })
+      .mockResolvedValue({ content: [{ type: "text", text: "Paid" }] });
+    const paying = withX402Client(client, {
+      account: {
+        address: "0x2222222222222222222222222222222222222222",
+        signTypedData: vi.fn().mockResolvedValue(`0x${"11".repeat(65)}`)
+      }
+    });
+    expect(
+      (await paying.callTool(null, { name: "test" })).isError
+    ).toBeUndefined();
+    const token = callTool.mock.calls[1][0]._meta?.["x402/payment"] as string;
+    const json = new TextDecoder().decode(
+      Uint8Array.from(atob(token), (c) => c.charCodeAt(0))
+    );
+    expect(JSON.parse(json).resource.description).toBe(description);
+  });
+});
