@@ -77,6 +77,21 @@ export function normalizeNetwork(network: string): Network {
   return (LEGACY_NETWORK_MAP[network] ?? network) as Network;
 }
 
+// `btoa`/`atob` only handle Latin-1, but a payment payload carries the
+// resource description (the tool description), which may hold any text.
+// Encode the JSON as UTF-8 first, as @x402/core does for its HTTP headers.
+function encodePaymentToken(payload: unknown): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(payload));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function decodePaymentToken(token: string): unknown {
+  const bytes = Uint8Array.from(atob(token), (c) => c.charCodeAt(0));
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
 /*
   ======= SERVER SIDE =======
 */
@@ -296,7 +311,7 @@ export function withX402(
         // Decode the payment payload (base64-encoded JSON)
         let paymentPayload: PaymentPayload;
         try {
-          paymentPayload = JSON.parse(atob(token));
+          paymentPayload = decodePaymentToken(token) as PaymentPayload;
         } catch {
           return paymentRequired("INVALID_PAYMENT");
         }
@@ -451,6 +466,13 @@ export function withX402Client<T extends CompatibleMcpClient>(
 
   // Create v2 x402 payment client with EVM scheme support
   const paymentClient = new x402Client();
+  // @x402/core 2.23+ applies default spend controls (a $1 per-payment cap and
+  // a default-asset allowlist) before selection. This client enforces
+  // `maxPaymentValue` itself in the hook below, so turn those defaults off to
+  // keep that cap the one that applies. Older @x402/core has no such method.
+  (
+    paymentClient as { setSpendControls?: (controls: false) => unknown }
+  ).setSpendControls?.(false);
   registerClientEvmScheme(paymentClient, { signer: account });
 
   // Payment requests whose selection reached the hook below. x402 selects a
@@ -605,7 +627,7 @@ export function withX402Client<T extends CompatibleMcpClient>(
       }
 
       // Encode the payment payload as a base64 JSON token for MCP transport
-      const token = btoa(JSON.stringify(paymentPayload));
+      const token = encodePaymentToken(paymentPayload);
 
       // Retry the tool call with the payment token
       return invoke({
